@@ -15,6 +15,7 @@ mod filter;
 mod reader;
 mod spill;
 mod ui;
+mod upstream;
 
 use std::io::{self, IsTerminal};
 use std::time::Duration;
@@ -57,6 +58,11 @@ struct Cli {
     /// Start in regex filter mode instead of fuzzy ('r' toggles at runtime)
     #[arg(long)]
     regex: bool,
+
+    /// On quit, leave the upstream pipeline command running instead of
+    /// terminating it (you may need Ctrl+C to get your prompt back)
+    #[arg(long)]
+    no_kill_upstream: bool,
 }
 
 fn main() -> io::Result<()> {
@@ -109,6 +115,12 @@ fn main() -> io::Result<()> {
     let result = run(&mut terminal, &mut app, &rx);
 
     restore_terminal();
+
+    // The producer keeps running (and the shell keeps waiting) until its next
+    // write hits the broken pipe — terminate it so quitting returns the prompt.
+    if !cli.no_kill_upstream {
+        upstream::terminate();
+    }
     result
 }
 

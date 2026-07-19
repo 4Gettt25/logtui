@@ -389,9 +389,11 @@ dependencies = [
  "crossbeam-channel",
  "crossterm",
  "fuzzy-matcher",
+ "libc",
  "ratatui",
  "regex",
  "tempfile",
+ "windows-sys 0.59.0",
 ]
 
 [[package]]
