@@ -12,6 +12,8 @@ pub enum Msg {
     Line(String),
     /// stdin reached EOF: the stream is now "static".
     Eof,
+    /// Reading stdin failed; no more input will arrive.
+    Err(String),
 }
 
 /// Spawn the reader thread. It exits after sending `Eof`, or immediately if
@@ -22,27 +24,37 @@ pub fn spawn(tx: Sender<Msg>) -> thread::JoinHandle<()> {
         .spawn(move || {
             let stdin = io::stdin();
             let mut lock = stdin.lock();
-            let mut line = String::new();
+            let mut raw = Vec::new();
             loop {
-                line.clear();
-                match lock.read_line(&mut line) {
-                    Ok(0) => break,            // EOF
+                raw.clear();
+                // Read raw bytes, not UTF-8 lines: real log streams routinely
+                // contain invalid sequences, and one bad byte must not end the
+                // stream.
+                match lock.read_until(b'\n', &mut raw) {
+                    Ok(0) => break, // EOF
                     Ok(_) => {
-                        while line.ends_with('\n') || line.ends_with('\r') {
-                            line.pop();
-                        }
-                        let clean = strip_controls(&line);
-                        line.clear();
-                        if tx.send(Msg::Line(clean)).is_err() {
+                        if tx.send(Msg::Line(sanitize_line(&raw))).is_err() {
                             return; // UI gone
                         }
                     }
-                    Err(_) => break,
+                    Err(e) => {
+                        let _ = tx.send(Msg::Err(e.to_string()));
+                        return;
+                    }
                 }
             }
             let _ = tx.send(Msg::Eof);
         })
         .expect("failed to spawn stdin reader thread")
+}
+
+/// One raw input record → clean display line: strip the line terminator,
+/// decode as UTF-8 (invalid bytes become U+FFFD), drop control sequences.
+fn sanitize_line(mut raw: &[u8]) -> String {
+    while let [rest @ .., b'\n' | b'\r'] = raw {
+        raw = rest;
+    }
+    strip_controls(&String::from_utf8_lossy(raw))
 }
 
 /// Remove terminal escape sequences and control characters from a log line.
@@ -107,7 +119,16 @@ fn strip_controls(s: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::strip_controls;
+    use super::{sanitize_line, strip_controls};
+
+    #[test]
+    fn sanitize_strips_terminators_and_decodes_lossily() {
+        assert_eq!(sanitize_line(b"hello\n"), "hello");
+        assert_eq!(sanitize_line(b"hello\r\n"), "hello");
+        assert_eq!(sanitize_line(b"no newline"), "no newline");
+        // Invalid UTF-8 must not kill the stream: bad bytes become U+FFFD.
+        assert_eq!(sanitize_line(b"bad \xff byte\n"), "bad \u{fffd} byte");
+    }
 
     #[test]
     fn plain_text_unchanged() {

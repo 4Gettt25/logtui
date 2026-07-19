@@ -36,14 +36,14 @@ fn render_row(
     hscroll: usize,
 ) -> Option<Line<'static>> {
     let abs = app.abs_at(row)?;
-    let text = app.buffer().get_abs(abs)?; // None if evicted
+    let text = app.line(abs)?; // ring if hot, spill file otherwise
     let selected = row == app.selected();
 
     let mut spans = Vec::new();
     let gutter = format!("{:>width$} ", abs + 1, width = gutter_w);
     spans.push(Span::styled(gutter, gutter_style()));
 
-    let hl = app.highlight_for(abs); // sorted char indices
+    let hl = app.highlight_for_text(&text); // sorted char indices
     let is_hl = |i: usize| hl.as_ref().is_some_and(|v| v.binary_search(&i).is_ok());
 
     let mut buf = String::new();
@@ -97,12 +97,19 @@ fn status_bar(app: &App) -> Line<'static> {
             .add_modifier(Modifier::BOLD),
     )];
 
-    let buf = app.buffer();
-    let mut count = format!(" {} lines", thousands(buf.len() as u64));
-    if buf.dropped() > 0 {
-        count.push_str(&format!(" ({} dropped)", thousands(buf.dropped())));
+    let mut count = format!(" {} lines", thousands(app.total_lines()));
+    // With the spill, evicted lines are still reachable — nothing is dropped.
+    if !app.spill_enabled() && app.buffer().dropped() > 0 {
+        count.push_str(&format!(" ({} dropped)", thousands(app.buffer().dropped())));
     }
     spans.push(Span::styled(count, Style::default().fg(Color::White)));
+
+    if let Some(e) = app.spill_error() {
+        spans.push(Span::styled(
+            format!("  │  ⚠ spill failed: {e}"),
+            Style::default().fg(Color::Red),
+        ));
+    }
 
     if let Some(f) = app.filter() {
         let mode = f.effective_mode().label();
@@ -121,8 +128,15 @@ fn status_bar(app: &App) -> Line<'static> {
     let (state, color) = match app.input_state() {
         InputState::Live => ("  │  ● LIVE", Color::Green),
         InputState::Eof => ("  │  ■ EOF", Color::Yellow),
+        InputState::Error => ("  │  ■ READ ERROR", Color::Red),
     };
     spans.push(Span::styled(state, Style::default().fg(color)));
+    if let Some(msg) = app.read_error() {
+        spans.push(Span::styled(
+            format!(" ({msg})"),
+            Style::default().fg(Color::Red),
+        ));
+    }
 
     if app.follow() {
         spans.push(Span::styled("  FOLLOW", Style::default().fg(Color::Green)));
@@ -162,7 +176,7 @@ fn thousands(n: u64) -> String {
     let s = n.to_string();
     let mut out = String::new();
     for (i, c) in s.chars().enumerate() {
-        if i > 0 && (s.len() - i) % 3 == 0 {
+        if i > 0 && (s.len() - i).is_multiple_of(3) {
             out.push(',');
         }
         out.push(c);
@@ -184,11 +198,11 @@ pub fn draw(f: &mut Frame, app: &mut App) {
     app.ensure_visible();
 
     let gutter_w = {
-        let max_line = app.buffer().dropped() + app.buffer().len() as u64;
-        if app.buffer().is_empty() {
+        let total = app.total_lines();
+        if total == 0 {
             4
         } else {
-            format!("{max_line}").len().max(4)
+            format!("{total}").len().max(4)
         }
     };
     let content_w = list_area.width.saturating_sub(gutter_w as u16 + 1) as usize;
@@ -203,6 +217,7 @@ pub fn draw(f: &mut Frame, app: &mut App) {
         let msg = match (app.input_state(), app.filter().is_some()) {
             (InputState::Live, false) => "waiting for input on stdin…",
             (InputState::Eof, false) => "input is empty (EOF)",
+            (InputState::Error, false) => "reading stdin failed — see status bar",
             (_, true) => "no matches — edit the filter or press Esc to clear",
         };
         lines.push(Line::from(Span::styled(

@@ -12,6 +12,7 @@ clap = { version = "4", features = ["derive"] }
 crossbeam-channel = "0.5"
 fuzzy-matcher = "0.3"
 regex = "1"
+tempfile = "3"
 
 [profile.release]
 opt-level = 3

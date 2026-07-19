@@ -5,13 +5,15 @@
 //!   journalctl -f | logtui --regex
 //!
 //! Architecture: a reader thread pumps stdin lines into a bounded channel;
-//! the UI thread drains it each tick into a capped ring buffer, keeps a
-//! filtered *view* over that buffer, and renders with ratatui.
+//! the UI thread drains it each tick into a capped ring buffer (hot tail
+//! cache) while archiving every line to a spill file, keeps a filtered
+//! *view* over the full history, and renders with ratatui.
 
 mod app;
 mod buffer;
 mod filter;
 mod reader;
+mod spill;
 mod ui;
 
 use std::io::{self, IsTerminal};
@@ -37,9 +39,15 @@ use filter::MatchMode;
                   infinite streams (tail -f, journalctl -f, docker compose logs -f)."
 )]
 struct Cli {
-    /// Ring buffer capacity: maximum lines kept in memory (oldest are dropped)
+    /// In-memory cache size in lines. Older lines spill to a temp file and
+    /// stay scrollable/filterable; RAM stays bounded regardless of input size
     #[arg(long, default_value_t = 10_000, value_name = "N")]
     buffer_size: usize,
+
+    /// Don't write history to a temp file: keep only --buffer-size lines
+    /// (older lines are gone for good, but nothing ever touches the disk)
+    #[arg(long)]
+    no_spill: bool,
 
     /// Don't auto-scroll on new lines: start at the top and stay put
     /// (browse what has been buffered so far, even while input streams in)
@@ -65,6 +73,22 @@ fn main() -> io::Result<()> {
     let (tx, rx) = crossbeam_channel::bounded::<reader::Msg>(8192);
     reader::spawn(tx);
 
+    // Build the app before touching the terminal: creating the spill file can
+    // fail, and the error should print to a normal (cooked) screen.
+    let mode = if cli.regex {
+        MatchMode::Regex
+    } else {
+        MatchMode::Fuzzy
+    };
+    let mut app = match App::new(cli.buffer_size, !cli.no_follow, mode, !cli.no_spill) {
+        Ok(app) => app,
+        Err(e) => {
+            eprintln!("logtui: cannot create the spill file ({e}).");
+            eprintln!("Retry with --no-spill to run without on-disk history.");
+            std::process::exit(2);
+        }
+    };
+
     // Restore the terminal even on panic.
     let original_hook = std::panic::take_hook();
     std::panic::set_hook(Box::new(move |info| {
@@ -81,13 +105,6 @@ fn main() -> io::Result<()> {
         std::process::exit(2);
     }
     let mut terminal = Terminal::new(CrosstermBackend::new(io::stdout()))?;
-
-    let mode = if cli.regex {
-        MatchMode::Regex
-    } else {
-        MatchMode::Fuzzy
-    };
-    let mut app = App::new(cli.buffer_size, !cli.no_follow, mode);
 
     let result = run(&mut terminal, &mut app, &rx);
 
@@ -111,21 +128,33 @@ fn run(
     rx: &crossbeam_channel::Receiver<reader::Msg>,
 ) -> io::Result<()> {
     let tick = Duration::from_millis(33); // ~30 fps cap, keeps UI snappy
+    // Bound the per-tick drain: a producer that outruns us (fast stream +
+    // per-line filter matching) must not pin us in the drain loop and starve
+    // input handling and rendering.
+    const MAX_DRAIN_PER_TICK: usize = 8192;
     loop {
-        // Drain everything the reader thread has for us this tick.
-        let mut got_data = false;
-        while let Ok(msg) = rx.try_recv() {
-            got_data = true;
-            match msg {
-                reader::Msg::Line(line) => app.push_line(line),
-                reader::Msg::Eof => app.set_eof(),
+        let mut drained = 0;
+        while drained < MAX_DRAIN_PER_TICK {
+            match rx.try_recv() {
+                Ok(reader::Msg::Line(line)) => app.push_line(line),
+                Ok(reader::Msg::Eof) => app.set_eof(),
+                Ok(reader::Msg::Err(e)) => app.set_read_error(e),
+                Err(_) => break,
             }
+            drained += 1;
         }
-        if got_data {
+        if drained > 0 {
             app.after_batch();
         }
 
-        if event::poll(tick)? {
+        // Hitting the cap means a backlog is waiting: don't block on the
+        // event poll, clear it at full speed (drawing throttles the loop).
+        let timeout = if drained == MAX_DRAIN_PER_TICK {
+            Duration::ZERO
+        } else {
+            tick
+        };
+        if event::poll(timeout)? {
             match event::read()? {
                 Event::Key(key) if key.kind != KeyEventKind::Release => app.on_key(key),
                 Event::Mouse(m) => match m.kind {

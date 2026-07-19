@@ -44,18 +44,9 @@ impl RingBuffer {
         self.lines.len()
     }
 
-    pub fn is_empty(&self) -> bool {
-        self.lines.is_empty()
-    }
-
     /// Number of lines evicted so far.
     pub fn dropped(&self) -> u64 {
         self.dropped
-    }
-
-    /// Absolute number of the line at ring position `pos`.
-    pub fn abs_of(&self, pos: usize) -> Option<u64> {
-        (pos < self.lines.len()).then(|| self.dropped + pos as u64)
     }
 
     /// Fetch a line by absolute number (None if already evicted).
@@ -91,7 +82,6 @@ mod tests {
         assert_eq!(b.get_abs(0), None);
         assert_eq!(b.get_abs(1), Some("b"));
         assert_eq!(b.get_abs(3), Some("d"));
-        assert_eq!(b.abs_of(0), Some(1));
         let collected: Vec<_> = b.iter_abs().collect();
         assert_eq!(collected, vec![(1, "b"), (2, "c"), (3, "d")]);
     }
