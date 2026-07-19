@@ -13,6 +13,25 @@ journalctl -f              | logtui --regex
 Works with **finite input** (`cat`, `find` — reads to EOF, then you browse a
 static view) and **infinite streams** (`tail -f` — auto-follows new lines).
 
+## Install
+
+**Prebuilt binary (Linux, static — no dependencies):**
+
+```sh
+curl -fsSL https://github.com/4Gettt25/logtui/releases/latest/download/logtui-x86_64-unknown-linux-musl.tar.gz | tar xz
+sudo install -m755 logtui /usr/local/bin/ && rm logtui
+```
+
+On ARM (Raspberry Pi, ARM servers) use `logtui-aarch64-unknown-linux-musl.tar.gz`;
+for Windows there's `logtui-x86_64-pc-windows-msvc.zip`. Without root, install to
+`~/.local/bin` instead.
+
+**From source (any platform with a Rust toolchain):**
+
+```sh
+cargo install --git https://github.com/4Gettt25/logtui
+```
+
 ## Screenshots
 
 | Follow mode (live stream) | Fuzzy filter `err` | Regex `api/(users\|orders)` |
